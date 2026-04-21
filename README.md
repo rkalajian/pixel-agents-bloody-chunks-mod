@@ -12,9 +12,28 @@ When an agent is dispatched, it explodes into bloody pixel chunks instead of qui
 
 **Note:** This mod edits files inside the installed extension. You will need to re-apply it after every pixel-agents update.
 
-### 1. Find your pixel-agents extension directory
+### Scripted (recommended)
 
-Open a terminal and run:
+```bash
+./install.sh
+```
+
+The script:
+1. Backs up the extension's `index.html` to `index.html.bak`
+2. Copies `blood-explosion.js` into the extension's assets directory
+3. Injects the `<script>` tag before the main bundle
+
+Then reload VS Code: **Cmd+Shift+P** → `Developer: Reload Window`
+
+The mod is active when you see this in the webview developer console:
+
+```
+[blood-explosion] Mod loaded — agents die violently now.
+```
+
+### Manual
+
+#### 1. Find your pixel-agents extension directory
 
 ```bash
 ls ~/.vscode/extensions/ | grep pixel-agents
@@ -26,7 +45,7 @@ The directory will be something like `pablodelucca.pixel-agents-1.3.0`. The full
 ~/.vscode/extensions/pablodelucca.pixel-agents-1.3.0/dist/webview/
 ```
 
-### 2. Copy the script
+#### 2. Copy the script
 
 ```bash
 cp blood-explosion.js ~/.vscode/extensions/pablodelucca.pixel-agents-1.3.0/dist/webview/assets/
@@ -34,7 +53,7 @@ cp blood-explosion.js ~/.vscode/extensions/pablodelucca.pixel-agents-1.3.0/dist/
 
 Replace `1.3.0` with your installed version.
 
-### 3. Inject the script tag
+#### 3. Inject the script tag
 
 Edit `~/.vscode/extensions/pablodelucca.pixel-agents-1.3.0/dist/webview/index.html` and add one line inside `<head>`, **before** the main `index-*.js` script:
 
@@ -47,27 +66,30 @@ Edit `~/.vscode/extensions/pablodelucca.pixel-agents-1.3.0/dist/webview/index.ht
 </head>
 ```
 
-### 4. Reload the extension
+#### 4. Reload the extension
 
 In VS Code: **Ctrl+Shift+P** (or **Cmd+Shift+P**) → `Developer: Reload Window`
 
-The mod is active when you see this in the webview developer console:
-
-```
-[blood-explosion] Mod loaded — agents die violently now.
-```
-
 ## Uninstalling
+
+### Scripted
+
+```bash
+./uninstall.sh
+```
+
+Restores the original `index.html` from the backup and removes the mod script. Reload VS Code to deactivate.
+
+### Manual
 
 Remove the `<script>` line you added from `index.html`. You can leave the JS file in place or delete it.
 
 ## Customisation
 
-Edit `blood-explosion.js` before copying. Constants at the top of the file:
+Edit `blood-explosion.js` before installing. Constants at the top of the file:
 
 | Constant | Default | Effect |
 |---|---|---|
-| `DEBUG` | `false` | Set `true` to log spawn coordinates and draw debug crosshairs |
 | `PARTICLE_COUNT` | `48` | Number of flying chunks per explosion |
 | `CHUNK_LIFETIME` | `150` | How long chunks stay on screen (frames at ~60fps ≈ 2.5s) |
 | `SPLAT_COUNT` | `12` | Number of blood splat marks left on the ground |
@@ -83,4 +105,4 @@ The mod injects into the webview before the React bundle loads. It:
 3. **Spawns a particle explosion** at that position on a transparent overlay canvas layered above the game canvas.
 4. **Suppresses the built-in despawn animation** by intercepting `fillRect` calls that match the matrix-rain effect's pixel size for 350ms after close.
 
-The position-detection handles multiple simultaneous agents correctly by using spatial clustering with a tight 6px threshold (tight enough to separate a sitting character from the desk sprite directly behind them, which differs by only 8px in Y at the default zoom level).
+The position-detection handles multiple simultaneous agents correctly by using spatial clustering with a tight 6px threshold (tight enough to separate a sitting character from the desk sprite directly behind them, which differs by only 8px in Y at the default zoom level). When the last agent closes and all sprites vanish, the explosion targets the character sprite by selecting the cluster with the lowest Y coordinate (the character sits above its desk).

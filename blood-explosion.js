@@ -4,7 +4,6 @@
   // blood-explosion mod for pixel-agents
   // When an agent is closed, it explodes into bloody pixel chunks instead of vanishing.
 
-  const DEBUG = false; // set false to silence
   const PARTICLE_COUNT = 48;
   const CHUNK_LIFETIME = 150;
   const GRAVITY = 0.35;
@@ -25,7 +24,6 @@
   let gameCanvas = null;
   let particles = [];
   let flashes = [];
-  let debugMarkers = [];
   let rafId = null;
   let drawHistory = [];
   // Suppress the game's built-in despawn (matrix-rain) animation after agent close.
@@ -130,22 +128,21 @@
   }
 
   // Find which cluster in `before` has no spatial match in `after`.
+  // When multiple clusters vanish (last agent closed), picks lowest Y — the character sprite,
+  // which sits above its desk (character center Y = seatRow*64-8, desk center Y = seatRow*64).
   function findMissingCluster(before, after) {
+    const missing = [];
     for (const b of before) {
       const matched = after.some(a => Math.abs(a.x - b.x) < CLUSTER_THRESHOLD && Math.abs(a.y - b.y) < CLUSTER_THRESHOLD);
-      if (!matched) return b;
+      if (!matched) missing.push(b);
     }
-    return null;
+    if (missing.length === 0) return null;
+    return missing.reduce((a, b) => b.y < a.y ? b : a);
   }
 
   // --- particle spawn ---
 
   function spawnExplosion(x, y) {
-    if (DEBUG) {
-      console.log(`[blood-explosion] spawnExplosion(${Math.round(x)}, ${Math.round(y)})`);
-      drawDebugMarker(x, y);
-    }
-
     for (let i = 0; i < PARTICLE_COUNT; i++) {
       const angle = Math.random() * Math.PI * 2;
       const isBone = Math.random() < 0.18;
@@ -220,31 +217,8 @@
       }
 
       overlayCtx.globalAlpha = 1;
-
-      for (let i = debugMarkers.length - 1; i >= 0; i--) {
-        const m = debugMarkers[i];
-        m.life--;
-        if (m.life <= 0) { debugMarkers.splice(i, 1); continue; }
-        const s = 20;
-        overlayCtx.save();
-        overlayCtx.globalAlpha = 1;
-        overlayCtx.strokeStyle = '#00ffff';
-        overlayCtx.lineWidth = 3;
-        overlayCtx.beginPath();
-        overlayCtx.moveTo(m.x - s, m.y - s); overlayCtx.lineTo(m.x + s, m.y + s);
-        overlayCtx.moveTo(m.x + s, m.y - s); overlayCtx.lineTo(m.x - s, m.y + s);
-        overlayCtx.stroke();
-        overlayCtx.strokeStyle = '#ffffff';
-        overlayCtx.lineWidth = 1;
-        overlayCtx.strokeRect(m.x - s, m.y - s, s * 2, s * 2);
-        overlayCtx.restore();
-      }
     }
     loop();
-  }
-
-  function drawDebugMarker(x, y) {
-    debugMarkers.push({ x, y, life: 180 });
   }
 
   // --- message intercept ---
@@ -262,17 +236,10 @@
 
             const clustersBefore = clusterPositions(drawHistory);
 
-            if (DEBUG) {
-              console.log(`[blood-explosion] agentClosed id=${d.id} | history=${drawHistory.length} | clusters=${clustersBefore.length}`);
-            }
-
             if (clustersBefore.length === 0) {
               // No sprite data — fall back to canvas center.
               const c = getCanvas();
-              const fx = c ? c.width * 0.5 : 200;
-              const fy = c ? c.height * 0.5 : 200;
-              if (DEBUG) console.log(`[blood-explosion] no data — fallback (${fx}, ${fy})`);
-              spawnExplosion(fx, fy);
+              spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200);
             } else {
               // Diff: reset history, wait 3 frames, find which cluster vanished.
               drawHistory = [];
@@ -287,7 +254,6 @@
                 }
 
                 const clustersAfter = clusterPositions(drawHistory);
-                if (DEBUG) console.log(`[blood-explosion] frame ${waited} | before=${clustersBefore.length} after=${clustersAfter.length}`);
 
                 const missing = clustersAfter.length < clustersBefore.length
                   ? findMissingCluster(clustersBefore, clustersAfter)
@@ -299,7 +265,6 @@
                 }
 
                 const target = missing || clustersBefore[clustersBefore.length - 1];
-                if (DEBUG) console.log(`[blood-explosion] target:`, JSON.stringify(target));
                 spawnExplosion(target.x, target.y);
               };
 
