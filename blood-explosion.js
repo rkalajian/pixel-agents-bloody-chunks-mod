@@ -13,11 +13,16 @@
   const CHUNK_SIZES = [2, 2, 3, 3, 4, 5];
   const SPLAT_COUNT = 12;
   const FLASH_FRAMES = 8;
-  const SNAPSHOT_FADE_MS = 700;
+
+  // Snapshot fade durations (ms).
+  // Multi-agent: short fade — view doesn't pan, just masks the despawn briefly.
+  // Last agent: covers the full chunk lifetime so particles always render on the
+  // correct frozen frame regardless of how the game camera re-pans underneath.
+  const SNAPSHOT_FADE_SHORT = 700;
+  const SNAPSHOT_FADE_LONG  = (CHUNK_LIFETIME + 30) * (1000 / 60); // ≈ 3 s at 60 fps
 
   // Spatial tolerance for clustering (px). Must be < gap between character and desk sprite centers.
   // At zoom=4: character center Y = seatRow*64-8, desk center Y = seatRow*64 → 8px gap.
-  // Threshold of 6 keeps them separate while still grouping same-sprite entries.
   const CLUSTER_THRESHOLD = 6;
 
   let overlayCanvas = null;
@@ -25,60 +30,43 @@
   let gameCanvas = null;
   let particles = [];
   let flashes = [];
-  let rafId = null;
   let drawHistory = [];
   let despawnSuppressUntil = 0;
 
-  // Snapshot of the game canvas at close time — drawn on the overlay with a fade
-  // so the pre-close view is visible behind particles during the camera pan.
   let snapshot = null;
   let snapshotStart = 0;
-
-  // Camera offset tracked from the game's setTransform calls (a > 1 = zoom transform).
-  // spawnCameraE/F are captured when the explosion fires; the delta is applied to
-  // particle render positions each frame so chunks track their world position as the camera pans.
-  let currentCameraE = 0;
-  let currentCameraF = 0;
-  let spawnCameraE = 0;
-  let spawnCameraF = 0;
+  let snapshotFadeMs = SNAPSHOT_FADE_SHORT;
 
   // --- overlay setup ---
 
-  function getCanvas() {
-    return document.querySelector('canvas');
-  }
+  function getCanvas() { return document.querySelector('canvas'); }
 
   function syncOverlay() {
     if (!gameCanvas || !overlayCanvas) return;
-    const r = gameCanvas.getBoundingClientRect();
+    const r  = gameCanvas.getBoundingClientRect();
     const pr = gameCanvas.parentElement.getBoundingClientRect();
-    overlayCanvas.width = gameCanvas.width;
+    overlayCanvas.width  = gameCanvas.width;
     overlayCanvas.height = gameCanvas.height;
-    overlayCanvas.style.width = r.width + 'px';
+    overlayCanvas.style.width  = r.width  + 'px';
     overlayCanvas.style.height = r.height + 'px';
-    overlayCanvas.style.left = (r.left - pr.left) + 'px';
-    overlayCanvas.style.top = (r.top - pr.top) + 'px';
+    overlayCanvas.style.left   = (r.left - pr.left) + 'px';
+    overlayCanvas.style.top    = (r.top  - pr.top)  + 'px';
   }
 
   function initOverlay() {
     gameCanvas = getCanvas();
-    if (!gameCanvas) {
-      setTimeout(initOverlay, 300);
-      return;
-    }
+    if (!gameCanvas) { setTimeout(initOverlay, 300); return; }
 
     overlayCanvas = document.createElement('canvas');
     overlayCanvas.style.cssText = 'position:absolute;pointer-events:none;z-index:9999;image-rendering:pixelated;';
     const parent = gameCanvas.parentElement;
-    const parentStyle = window.getComputedStyle(parent);
-    if (parentStyle.position === 'static') parent.style.position = 'relative';
+    if (window.getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
     parent.appendChild(overlayCanvas);
     overlayCtx = overlayCanvas.getContext('2d');
     overlayCtx.imageSmoothingEnabled = false;
 
     syncOverlay();
     new ResizeObserver(syncOverlay).observe(gameCanvas);
-
     interceptCanvas();
     startLoop();
     console.log('[blood-explosion] Mod loaded — agents die violently now.');
@@ -87,31 +75,14 @@
   // --- canvas intercepts ---
 
   function interceptCanvas() {
-    const origDraw = CanvasRenderingContext2D.prototype.drawImage;
+    const origDraw     = CanvasRenderingContext2D.prototype.drawImage;
     const origFillRect = CanvasRenderingContext2D.prototype.fillRect;
-    const origSetTransform = CanvasRenderingContext2D.prototype.setTransform;
 
-    // Track the game's camera transform. The game calls setTransform(zoom, 0, 0, zoom, e, f)
-    // each frame; e and f are the canvas-pixel offset of the camera. We record them so we can
-    // compute how far the camera has panned since the explosion was spawned and shift particles
-    // by the same delta, keeping them anchored to their world position.
-    CanvasRenderingContext2D.prototype.setTransform = function (a, b, c, d, e, f) {
-      if (this.canvas !== overlayCanvas && a > 1) {
-        currentCameraE = e;
-        currentCameraF = f;
-      }
-      return origSetTransform.apply(this, arguments);
-    };
-
-    // Suppress the game's despawn (matrix-rain) animation.
     CanvasRenderingContext2D.prototype.fillRect = function (x, y, w, h) {
-      if (this.canvas !== overlayCanvas && w === h && w < 16 && Date.now() < despawnSuppressUntil) {
-        return;
-      }
+      if (this.canvas !== overlayCanvas && w === h && w < 16 && Date.now() < despawnSuppressUntil) return;
       return origFillRect.apply(this, arguments);
     };
 
-    // Track all non-mirrored 2:1 sprite drawImages to detect which agent closed.
     CanvasRenderingContext2D.prototype.drawImage = function (...args) {
       const result = origDraw.apply(this, args);
       if (this.canvas === overlayCanvas) return result;
@@ -132,55 +103,42 @@
   function captureSnapshot() {
     if (!gameCanvas) return;
     const cvs = document.createElement('canvas');
-    cvs.width = gameCanvas.width;
+    cvs.width  = gameCanvas.width;
     cvs.height = gameCanvas.height;
     cvs.getContext('2d').drawImage(gameCanvas, 0, 0);
-    snapshot = cvs;
-    snapshotStart = Date.now();
+    snapshot       = cvs;
+    snapshotStart  = Date.now();
+    snapshotFadeMs = SNAPSHOT_FADE_SHORT; // may be extended by diff check
   }
 
-  // Cluster drawHistory entries by spatial proximity.
   function clusterPositions(history) {
     const clusters = [];
     for (const p of history) {
       const c = clusters.find(c => Math.abs(c.x - p.x) < CLUSTER_THRESHOLD && Math.abs(c.y - p.y) < CLUSTER_THRESHOLD);
-      if (c) {
-        c.count++;
-        c.x += (p.x - c.x) / c.count;
-        c.y += (p.y - c.y) / c.count;
-      } else {
-        clusters.push({ x: p.x, y: p.y, count: 1 });
-      }
+      if (c) { c.count++; c.x += (p.x - c.x) / c.count; c.y += (p.y - c.y) / c.count; }
+      else clusters.push({ x: p.x, y: p.y, count: 1 });
     }
     return clusters;
   }
 
-  // Find the cluster in `before` with no spatial match in `after`.
-  // When multiple vanish (last agent), picks lowest Y = character sprite (above its desk).
   function findMissingCluster(before, after) {
     const missing = [];
     for (const b of before) {
-      const matched = after.some(a => Math.abs(a.x - b.x) < CLUSTER_THRESHOLD && Math.abs(a.y - b.y) < CLUSTER_THRESHOLD);
-      if (!matched) missing.push(b);
+      if (!after.some(a => Math.abs(a.x - b.x) < CLUSTER_THRESHOLD && Math.abs(a.y - b.y) < CLUSTER_THRESHOLD))
+        missing.push(b);
     }
-    if (missing.length === 0) return null;
+    if (!missing.length) return null;
     return missing.reduce((a, b) => b.y < a.y ? b : a);
   }
 
   // --- particle spawn ---
 
-  function spawnExplosion(x, y) {
-    // Record the camera offset at spawn time. The render loop applies the delta
-    // (currentCamera - spawnCamera) to particle positions every frame so they
-    // stay anchored to the world position even as the camera pans.
-    spawnCameraE = currentCameraE;
-    spawnCameraF = currentCameraF;
-
+  function spawnExplosion(x, y, withSplats = true) {
     for (let i = 0; i < PARTICLE_COUNT; i++) {
-      const angle = Math.random() * Math.PI * 2;
+      const angle  = Math.random() * Math.PI * 2;
       const isBone = Math.random() < 0.18;
-      const speed = 1.5 + Math.random() * 7;
-      const size = CHUNK_SIZES[Math.floor(Math.random() * CHUNK_SIZES.length)];
+      const speed  = 1.5 + Math.random() * 7;
+      const size   = CHUNK_SIZES[Math.floor(Math.random() * CHUNK_SIZES.length)];
       particles.push({
         x, y,
         vx: Math.cos(angle) * speed,
@@ -194,19 +152,21 @@
       });
     }
 
-    for (let i = 0; i < SPLAT_COUNT; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const dist = 2 + Math.random() * 22;
-      particles.push({
-        x: x + Math.cos(angle) * dist,
-        y: y + Math.sin(angle) * dist + 10,
-        vx: 0, vy: 0,
-        color: BLOOD_COLORS[Math.floor(Math.random() * 3)],
-        size: 1 + Math.floor(Math.random() * 4),
-        life: CHUNK_LIFETIME * 4,
-        maxLife: CHUNK_LIFETIME * 4,
-        splat: true,
-      });
+    if (withSplats) {
+      for (let i = 0; i < SPLAT_COUNT; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist  = 2 + Math.random() * 22;
+        particles.push({
+          x: x + Math.cos(angle) * dist,
+          y: y + Math.sin(angle) * dist + 10,
+          vx: 0, vy: 0,
+          color: BLOOD_COLORS[Math.floor(Math.random() * 3)],
+          size: 1 + Math.floor(Math.random() * 4),
+          life: CHUNK_LIFETIME * 4,
+          maxLife: CHUNK_LIFETIME * 4,
+          splat: true,
+        });
+      }
     }
   }
 
@@ -214,20 +174,17 @@
 
   function startLoop() {
     function loop() {
-      rafId = requestAnimationFrame(loop);
+      requestAnimationFrame(loop);
       if (!overlayCtx) return;
 
-      const w = overlayCanvas.width;
-      const h = overlayCanvas.height;
+      const w = overlayCanvas.width, h = overlayCanvas.height;
       overlayCtx.clearRect(0, 0, w, h);
       overlayCtx.imageSmoothingEnabled = false;
 
-      // Frozen game-canvas snapshot, fading out. Keeps the pre-close view visible
-      // behind particles for SNAPSHOT_FADE_MS ms while the game camera re-pans.
       if (snapshot) {
         const elapsed = Date.now() - snapshotStart;
-        if (elapsed < SNAPSHOT_FADE_MS) {
-          overlayCtx.globalAlpha = 1 - elapsed / SNAPSHOT_FADE_MS;
+        if (elapsed < snapshotFadeMs) {
+          overlayCtx.globalAlpha = 1 - elapsed / snapshotFadeMs;
           overlayCtx.drawImage(snapshot, 0, 0);
           overlayCtx.globalAlpha = 1;
         } else {
@@ -237,38 +194,20 @@
 
       for (let i = flashes.length - 1; i >= 0; i--) {
         const f = flashes[i];
-        f.life--;
-        if (f.life <= 0) { flashes.splice(i, 1); continue; }
+        if (--f.life <= 0) { flashes.splice(i, 1); continue; }
         overlayCtx.globalAlpha = (f.life / f.maxLife) * 0.35;
         overlayCtx.fillStyle = '#ff0000';
         overlayCtx.fillRect(0, 0, w, h);
       }
 
-      // Camera pan delta since the explosion was spawned.
-      // Applied to every particle so chunks stay anchored to their world position.
-      const panX = currentCameraE - spawnCameraE;
-      const panY = currentCameraF - spawnCameraF;
-
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
-        p.life--;
-        if (p.life <= 0) { particles.splice(i, 1); continue; }
-
-        if (!p.splat) {
-          p.x += p.vx;
-          p.y += p.vy;
-          p.vy += GRAVITY;
-          p.vx *= DRAG;
-        }
-
+        if (--p.life <= 0) { particles.splice(i, 1); continue; }
+        if (!p.splat) { p.x += p.vx; p.y += p.vy; p.vy += GRAVITY; p.vx *= DRAG; }
         const t = p.life / p.maxLife;
         overlayCtx.globalAlpha = p.splat ? Math.min(1, t * 3) : t;
         overlayCtx.fillStyle = p.color;
-        overlayCtx.fillRect(
-          Math.round(p.x + panX - p.size * 0.5),
-          Math.round(p.y + panY - p.size * 0.5),
-          p.size, p.size
-        );
+        overlayCtx.fillRect(Math.round(p.x - p.size * 0.5), Math.round(p.y - p.size * 0.5), p.size, p.size);
       }
 
       overlayCtx.globalAlpha = 1;
@@ -296,20 +235,29 @@
               spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200);
             } else {
               const charCluster = clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
-              spawnExplosion(charCluster.x, charCluster.y);
+              spawnExplosion(charCluster.x, charCluster.y); // splats on by default
 
               drawHistory = [];
               let waited = 0;
               const check = () => {
                 waited++;
                 const clustersAfter = clusterPositions(drawHistory);
+
                 if (clustersAfter.length === 0) {
                   if (waited < 3) { requestAnimationFrame(check); return; }
+                  // Last agent confirmed. Extend snapshot to cover full chunk lifetime so
+                  // particles always render on the correct frozen frame while the game
+                  // camera re-pans underneath. Also purge splats — they'd linger ~10 s
+                  // and would visually drift off-position once the snapshot ends.
+                  snapshotFadeMs = SNAPSHOT_FADE_LONG;
+                  for (let i = particles.length - 1; i >= 0; i--) {
+                    if (particles[i].splat) particles.splice(i, 1);
+                  }
                   return;
                 }
+
                 const missing = clustersAfter.length < clustersBefore.length
-                  ? findMissingCluster(clustersBefore, clustersAfter)
-                  : null;
+                  ? findMissingCluster(clustersBefore, clustersAfter) : null;
                 if (!missing && waited < 12) { requestAnimationFrame(check); return; }
                 if (missing) {
                   const dist = Math.hypot(missing.x - charCluster.x, missing.y - charCluster.y);
@@ -327,7 +275,6 @@
     return _addEvt(type, listener, options);
   };
 
-  // init
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initOverlay);
   } else {
