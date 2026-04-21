@@ -241,37 +241,34 @@
               const c = getCanvas();
               spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200);
             } else {
-              // Diff: reset history, wait for next frames, find which cluster vanished.
+              // Fire synchronously at the character cluster (lowest Y = above desk).
+              // This runs in the message handler before any RAF re-render, so coordinates
+              // are valid even when the game re-pans after the last agent is removed.
+              const charCluster = clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
+              spawnExplosion(charCluster.x, charCluster.y);
+
+              // For multi-agent: also diff to fire at the actual closed agent if it's
+              // a different position than the one we just fired at.
               drawHistory = [];
               let waited = 0;
-
               const check = () => {
                 waited++;
                 const clustersAfter = clusterPositions(drawHistory);
-
                 if (clustersAfter.length === 0) {
-                  // No sprites drawn — last/only agent closed. Fire immediately before
-                  // the game re-renders at panned/centered coordinates (waiting longer
-                  // causes the explosion to land in the wrong visual position).
-                  if (waited < 2) { requestAnimationFrame(check); return; }
-                  const target = clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
-                  spawnExplosion(target.x, target.y);
-                  return;
+                  if (waited < 3) { requestAnimationFrame(check); return; }
+                  return; // last agent — already handled by synchronous fire above
                 }
-
                 const missing = clustersAfter.length < clustersBefore.length
                   ? findMissingCluster(clustersBefore, clustersAfter)
                   : null;
-
-                if (!missing && waited < 12) {
-                  requestAnimationFrame(check);
-                  return;
+                if (!missing && waited < 12) { requestAnimationFrame(check); return; }
+                if (missing) {
+                  // Only fire a second explosion if diff found a meaningfully different position
+                  // (i.e. a non-topmost agent closed in a multi-agent scenario).
+                  const dist = Math.hypot(missing.x - charCluster.x, missing.y - charCluster.y);
+                  if (dist > CLUSTER_THRESHOLD * 4) spawnExplosion(missing.x, missing.y);
                 }
-
-                const target = missing || clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
-                spawnExplosion(target.x, target.y);
               };
-
               requestAnimationFrame(check);
             }
           }
