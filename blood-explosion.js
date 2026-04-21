@@ -14,16 +14,13 @@
   const SPLAT_COUNT = 12;
   const FLASH_FRAMES = 8;
 
-  // Snapshot fade durations (ms).
-  // Multi-agent: short fade — view doesn't pan, just masks the despawn briefly.
-  // Last agent: covers the full chunk lifetime so particles always render on the
-  // correct frozen frame regardless of how the game camera re-pans underneath.
-  const SNAPSHOT_FADE_SHORT = 700;
-  const SNAPSHOT_FADE_LONG  = (CHUNK_LIFETIME + 30) * (1000 / 60); // ≈ 3 s at 60 fps
-
   // Spatial tolerance for clustering (px). Must be < gap between character and desk sprite centers.
   // At zoom=4: character center Y = seatRow*64-8, desk center Y = seatRow*64 → 8px gap.
   const CLUSTER_THRESHOLD = 6;
+
+  // Each agent contributes ~2 sprite clusters (character + desk). Used to decide
+  // whether a diff check is worth running after close.
+  const SPRITES_PER_AGENT = 2;
 
   let overlayCanvas = null;
   let overlayCtx = null;
@@ -33,9 +30,15 @@
   let drawHistory = [];
   let despawnSuppressUntil = 0;
 
+  // Snapshot of the game canvas captured synchronously on agentClosed.
+  // snapshotHold=true: keep at opacity 1 until all particles die (last-agent case, camera pans).
+  // snapshotHold=false: linear fade over snapshotFadeMs (multi-agent, camera stays).
   let snapshot = null;
   let snapshotStart = 0;
-  let snapshotFadeMs = SNAPSHOT_FADE_SHORT;
+  let snapshotFadeMs = 700;
+  let snapshotHold = false;
+  let snapshotFadeOutStart = 0;
+  const SNAPSHOT_FADEOUT_MS = 300;
 
   // --- overlay setup ---
 
@@ -78,11 +81,13 @@
     const origDraw     = CanvasRenderingContext2D.prototype.drawImage;
     const origFillRect = CanvasRenderingContext2D.prototype.fillRect;
 
+    // Suppress the game's despawn (matrix-rain) animation.
     CanvasRenderingContext2D.prototype.fillRect = function (x, y, w, h) {
       if (this.canvas !== overlayCanvas && w === h && w < 16 && Date.now() < despawnSuppressUntil) return;
       return origFillRect.apply(this, arguments);
     };
 
+    // Track 2:1 sprites to detect agent positions.
     CanvasRenderingContext2D.prototype.drawImage = function (...args) {
       const result = origDraw.apply(this, args);
       if (this.canvas === overlayCanvas) return result;
@@ -106,9 +111,11 @@
     cvs.width  = gameCanvas.width;
     cvs.height = gameCanvas.height;
     cvs.getContext('2d').drawImage(gameCanvas, 0, 0);
-    snapshot       = cvs;
-    snapshotStart  = Date.now();
-    snapshotFadeMs = SNAPSHOT_FADE_SHORT; // may be extended by diff check
+    snapshot           = cvs;
+    snapshotStart      = Date.now();
+    snapshotFadeMs     = 700;
+    snapshotHold       = false;
+    snapshotFadeOutStart = 0;
   }
 
   function clusterPositions(history) {
@@ -182,13 +189,35 @@
       overlayCtx.imageSmoothingEnabled = false;
 
       if (snapshot) {
-        const elapsed = Date.now() - snapshotStart;
-        if (elapsed < snapshotFadeMs) {
-          overlayCtx.globalAlpha = 1 - elapsed / snapshotFadeMs;
-          overlayCtx.drawImage(snapshot, 0, 0);
-          overlayCtx.globalAlpha = 1;
+        if (snapshotHold) {
+          if (particles.length > 0) {
+            // Hold at full opacity while particles are alive. This keeps the frozen
+            // pre-close frame as the background so particles always render against the
+            // correct view regardless of how the game camera re-pans underneath.
+            overlayCtx.globalAlpha = 1;
+            overlayCtx.drawImage(snapshot, 0, 0);
+            overlayCtx.globalAlpha = 1;
+          } else {
+            // All particles gone — fade out the snapshot quickly.
+            if (!snapshotFadeOutStart) snapshotFadeOutStart = Date.now();
+            const t = (Date.now() - snapshotFadeOutStart) / SNAPSHOT_FADEOUT_MS;
+            if (t < 1) {
+              overlayCtx.globalAlpha = 1 - t;
+              overlayCtx.drawImage(snapshot, 0, 0);
+              overlayCtx.globalAlpha = 1;
+            } else {
+              snapshot = null;
+            }
+          }
         } else {
-          snapshot = null;
+          const elapsed = Date.now() - snapshotStart;
+          if (elapsed < snapshotFadeMs) {
+            overlayCtx.globalAlpha = 1 - elapsed / snapshotFadeMs;
+            overlayCtx.drawImage(snapshot, 0, 0);
+            overlayCtx.globalAlpha = 1;
+          } else {
+            snapshot = null;
+          }
         }
       }
 
@@ -232,30 +261,33 @@
 
             if (clustersBefore.length === 0) {
               const c = getCanvas();
-              spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200);
-            } else {
-              const charCluster = clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
-              spawnExplosion(charCluster.x, charCluster.y); // splats on by default
+              // No history — single agent, hold snapshot.
+              snapshotHold = true;
+              spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200, false);
+              return listener.call(this, event);
+            }
 
+            const charCluster = clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
+            const agentCount  = Math.round(clustersBefore.length / SPRITES_PER_AGENT);
+
+            if (agentCount <= 1) {
+              // Single agent: fire and hold snapshot — no diff check needed, nothing
+              // to diff against, and spurious UI sprites would trigger false explosions.
+              snapshotHold = true;
+              spawnExplosion(charCluster.x, charCluster.y, false);
+            } else {
+              // Multiple agents: run diff to find the one that vanished.
+              // Short snapshot fade is fine — the camera doesn't pan when agents remain.
+              spawnExplosion(charCluster.x, charCluster.y);
               drawHistory = [];
               let waited = 0;
               const check = () => {
                 waited++;
                 const clustersAfter = clusterPositions(drawHistory);
-
                 if (clustersAfter.length === 0) {
                   if (waited < 3) { requestAnimationFrame(check); return; }
-                  // Last agent confirmed. Extend snapshot to cover full chunk lifetime so
-                  // particles always render on the correct frozen frame while the game
-                  // camera re-pans underneath. Also purge splats — they'd linger ~10 s
-                  // and would visually drift off-position once the snapshot ends.
-                  snapshotFadeMs = SNAPSHOT_FADE_LONG;
-                  for (let i = particles.length - 1; i >= 0; i--) {
-                    if (particles[i].splat) particles.splice(i, 1);
-                  }
                   return;
                 }
-
                 const missing = clustersAfter.length < clustersBefore.length
                   ? findMissingCluster(clustersBefore, clustersAfter) : null;
                 if (!missing && waited < 12) { requestAnimationFrame(check); return; }
