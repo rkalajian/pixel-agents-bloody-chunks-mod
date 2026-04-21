@@ -13,9 +13,6 @@
   const CHUNK_SIZES = [2, 2, 3, 3, 4, 5];
   const SPLAT_COUNT = 12;
   const FLASH_FRAMES = 8;
-  // How long to fade out the frozen game-canvas snapshot (ms).
-  // During the fade the pre-close view is visible behind the particles, so the
-  // explosion always appears at the correct position regardless of camera panning.
   const SNAPSHOT_FADE_MS = 700;
 
   // Spatial tolerance for clustering (px). Must be < gap between character and desk sprite centers.
@@ -30,13 +27,20 @@
   let flashes = [];
   let rafId = null;
   let drawHistory = [];
-  // Suppress the game's built-in despawn (matrix-rain) animation after agent close.
-  // xr() renders it as fillRect(x, y, zoom, zoom) — tiny squares, no other render path uses them.
   let despawnSuppressUntil = 0;
-  // Snapshot of the game canvas captured synchronously on agentClosed, drawn on the overlay
-  // with a fade so the explosion lands on the correct pre-close view even if the camera pans.
-  let snapshot = null;       // HTMLCanvasElement holding the frozen frame
-  let snapshotStart = 0;     // Date.now() when snapshot was taken
+
+  // Snapshot of the game canvas at close time — drawn on the overlay with a fade
+  // so the pre-close view is visible behind particles during the camera pan.
+  let snapshot = null;
+  let snapshotStart = 0;
+
+  // Camera offset tracked from the game's setTransform calls (a > 1 = zoom transform).
+  // spawnCameraE/F are captured when the explosion fires; the delta is applied to
+  // particle render positions each frame so chunks track their world position as the camera pans.
+  let currentCameraE = 0;
+  let currentCameraF = 0;
+  let spawnCameraE = 0;
+  let spawnCameraF = 0;
 
   // --- overlay setup ---
 
@@ -75,19 +79,31 @@
     syncOverlay();
     new ResizeObserver(syncOverlay).observe(gameCanvas);
 
-    interceptDrawImage();
+    interceptCanvas();
     startLoop();
     console.log('[blood-explosion] Mod loaded — agents die violently now.');
   }
 
   // --- canvas intercepts ---
 
-  function interceptDrawImage() {
+  function interceptCanvas() {
     const origDraw = CanvasRenderingContext2D.prototype.drawImage;
     const origFillRect = CanvasRenderingContext2D.prototype.fillRect;
+    const origSetTransform = CanvasRenderingContext2D.prototype.setTransform;
+
+    // Track the game's camera transform. The game calls setTransform(zoom, 0, 0, zoom, e, f)
+    // each frame; e and f are the canvas-pixel offset of the camera. We record them so we can
+    // compute how far the camera has panned since the explosion was spawned and shift particles
+    // by the same delta, keeping them anchored to their world position.
+    CanvasRenderingContext2D.prototype.setTransform = function (a, b, c, d, e, f) {
+      if (this.canvas !== overlayCanvas && a > 1) {
+        currentCameraE = e;
+        currentCameraF = f;
+      }
+      return origSetTransform.apply(this, arguments);
+    };
 
     // Suppress the game's despawn (matrix-rain) animation.
-    // xr() renders it as fillRect(x, y, a, a) where a=zoom (≤8px). No other path uses sub-16px squares.
     CanvasRenderingContext2D.prototype.fillRect = function (x, y, w, h) {
       if (this.canvas !== overlayCanvas && w === h && w < 16 && Date.now() < despawnSuppressUntil) {
         return;
@@ -95,20 +111,15 @@
       return origFillRect.apply(this, arguments);
     };
 
-    // Track all non-mirrored 2:1 sprite drawImages.
-    // Characters in Cr() are always drawn non-mirrored: drawImage(sprite, x, y) with non-zero y.
-    // Mirrored furniture uses translate+scale+drawImage(img,0,0) — excluded by dx===0&&dy===0 guard.
+    // Track all non-mirrored 2:1 sprite drawImages to detect which agent closed.
     CanvasRenderingContext2D.prototype.drawImage = function (...args) {
       const result = origDraw.apply(this, args);
       if (this.canvas === overlayCanvas) return result;
-
       if (args.length === 3) {
         const img = args[0];
         const dw = img.width || img.naturalWidth || 0;
         const dh = img.height || img.naturalHeight || 0;
         const dx = args[1], dy = args[2];
-
-        // 2:1 sprites only (characters and tall furniture). dx===0&&dy===0 excluded (mirrored furniture).
         if (dh === dw * 2 && dw > 4 && (dx !== 0 || dy !== 0)) {
           drawHistory.push({ x: dx + dw * 0.5, y: dy + dh * 0.5 });
           if (drawHistory.length > 300) drawHistory.shift();
@@ -118,7 +129,6 @@
     };
   }
 
-  // Capture the current game canvas into an offscreen canvas for use as a snapshot.
   function captureSnapshot() {
     if (!gameCanvas) return;
     const cvs = document.createElement('canvas');
@@ -130,7 +140,6 @@
   }
 
   // Cluster drawHistory entries by spatial proximity.
-  // CLUSTER_THRESHOLD must be < 8px (the gap between character and desk sprite centers at zoom=4).
   function clusterPositions(history) {
     const clusters = [];
     for (const p of history) {
@@ -146,9 +155,8 @@
     return clusters;
   }
 
-  // Find which cluster in `before` has no spatial match in `after`.
-  // When multiple clusters vanish (last agent closed), picks lowest Y — the character sprite,
-  // which sits above its desk (character center Y = seatRow*64-8, desk center Y = seatRow*64).
+  // Find the cluster in `before` with no spatial match in `after`.
+  // When multiple vanish (last agent), picks lowest Y = character sprite (above its desk).
   function findMissingCluster(before, after) {
     const missing = [];
     for (const b of before) {
@@ -162,6 +170,12 @@
   // --- particle spawn ---
 
   function spawnExplosion(x, y) {
+    // Record the camera offset at spawn time. The render loop applies the delta
+    // (currentCamera - spawnCamera) to particle positions every frame so they
+    // stay anchored to the world position even as the camera pans.
+    spawnCameraE = currentCameraE;
+    spawnCameraF = currentCameraF;
+
     for (let i = 0; i < PARTICLE_COUNT; i++) {
       const angle = Math.random() * Math.PI * 2;
       const isBone = Math.random() < 0.18;
@@ -208,9 +222,8 @@
       overlayCtx.clearRect(0, 0, w, h);
       overlayCtx.imageSmoothingEnabled = false;
 
-      // Draw the frozen game-canvas snapshot under everything else, fading out over SNAPSHOT_FADE_MS.
-      // This keeps the pre-close view visible behind the explosion so particles appear at the right
-      // position even if the game camera re-pans after the last agent is removed.
+      // Frozen game-canvas snapshot, fading out. Keeps the pre-close view visible
+      // behind particles for SNAPSHOT_FADE_MS ms while the game camera re-pans.
       if (snapshot) {
         const elapsed = Date.now() - snapshotStart;
         if (elapsed < SNAPSHOT_FADE_MS) {
@@ -231,6 +244,11 @@
         overlayCtx.fillRect(0, 0, w, h);
       }
 
+      // Camera pan delta since the explosion was spawned.
+      // Applied to every particle so chunks stay anchored to their world position.
+      const panX = currentCameraE - spawnCameraE;
+      const panY = currentCameraF - spawnCameraF;
+
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
         p.life--;
@@ -246,7 +264,11 @@
         const t = p.life / p.maxLife;
         overlayCtx.globalAlpha = p.splat ? Math.min(1, t * 3) : t;
         overlayCtx.fillStyle = p.color;
-        overlayCtx.fillRect(Math.round(p.x - p.size * 0.5), Math.round(p.y - p.size * 0.5), p.size, p.size);
+        overlayCtx.fillRect(
+          Math.round(p.x + panX - p.size * 0.5),
+          Math.round(p.y + panY - p.size * 0.5),
+          p.size, p.size
+        );
       }
 
       overlayCtx.globalAlpha = 1;
@@ -263,28 +285,19 @@
         try {
           const d = event.data;
           if (d && d.type === 'agentClosed') {
-            // Flash + suppress matrix-rain despawn.
             flashes.push({ life: FLASH_FRAMES, maxLife: FLASH_FRAMES });
             despawnSuppressUntil = Date.now() + 350;
-
-            // Snapshot the game canvas before passing the event to the game.
-            // The snapshot is drawn on the overlay with a fade so the explosion
-            // particles always appear over the correct pre-close view, regardless
-            // of how or when the game camera pans afterward.
             captureSnapshot();
 
             const clustersBefore = clusterPositions(drawHistory);
 
             if (clustersBefore.length === 0) {
-              // No sprite data — fall back to canvas center.
               const c = getCanvas();
               spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200);
             } else {
-              // Fire synchronously at the character cluster (lowest Y = above desk).
               const charCluster = clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
               spawnExplosion(charCluster.x, charCluster.y);
 
-              // For multi-agent: diff to also fire at the actual closed agent if different.
               drawHistory = [];
               let waited = 0;
               const check = () => {
@@ -292,7 +305,7 @@
                 const clustersAfter = clusterPositions(drawHistory);
                 if (clustersAfter.length === 0) {
                   if (waited < 3) { requestAnimationFrame(check); return; }
-                  return; // last agent — synchronous fire above was correct
+                  return;
                 }
                 const missing = clustersAfter.length < clustersBefore.length
                   ? findMissingCluster(clustersBefore, clustersAfter)
