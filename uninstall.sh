@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXT_DIR="$HOME/.vscode/extensions/pablodelucca.pixel-agents-1.3.0"
+EXT_DIR=$(ls -d "${HOME}/.vscode/extensions/pablodelucca.pixel-agents-"* 2>/dev/null | sort -V | tail -1)
+if [ -z "$EXT_DIR" ]; then
+  echo "ERROR: pixel-agents extension not found in $HOME/.vscode/extensions/"
+  exit 1
+fi
 WEBVIEW_DIR="$EXT_DIR/dist/webview"
 HTML="$WEBVIEW_DIR/index.html"
 BACKUP="$HTML.bak"
