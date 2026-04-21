@@ -29,6 +29,11 @@
   // Suppress the game's built-in despawn (matrix-rain) animation after agent close.
   // xr() draws it using fillRect(x, y, zoom, zoom) — tiny squares, no other render path uses them.
   let despawnSuppressUntil = 0;
+  // Freeze the camera transform after agent close so the view doesn't re-pan.
+  // The game calls setTransform(zoom, 0, 0, zoom, offsetX, offsetY) each frame to position the camera.
+  // Locking it prevents the "center on empty room" re-pan that misaligns the explosion.
+  let cameraLockUntil = 0;
+  let lockedCameraArgs = null;
 
   // --- overlay setup ---
 
@@ -77,6 +82,20 @@
   function interceptDrawImage() {
     const origDraw = CanvasRenderingContext2D.prototype.drawImage;
     const origFillRect = CanvasRenderingContext2D.prototype.fillRect;
+    const origSetTransform = CanvasRenderingContext2D.prototype.setTransform;
+
+    // Freeze the camera transform during lock window.
+    // The game sets its camera via setTransform(zoom, 0, 0, zoom, offsetX, offsetY) each frame.
+    // We identify camera calls by a > 1 (zoom > 1). Non-camera calls (identity reset) pass through.
+    CanvasRenderingContext2D.prototype.setTransform = function (a, b, c, d, e, f) {
+      if (this.canvas !== overlayCanvas && a > 1) {
+        if (Date.now() < cameraLockUntil && lockedCameraArgs) {
+          return origSetTransform.apply(this, lockedCameraArgs);
+        }
+        lockedCameraArgs = [a, b, c, d, e, f];
+      }
+      return origSetTransform.apply(this, arguments);
+    };
 
     // Suppress the game's despawn (matrix-rain) animation.
     // xr() renders it as fillRect(x, y, a, a) where a=zoom (≤8px). No other path uses sub-16px squares.
@@ -230,9 +249,10 @@
         try {
           const d = event.data;
           if (d && d.type === 'agentClosed') {
-            // Flash immediately + suppress the game's matrix-rain despawn for 350ms.
+            // Flash + suppress matrix-rain despawn + lock camera position.
             flashes.push({ life: FLASH_FRAMES, maxLife: FLASH_FRAMES });
             despawnSuppressUntil = Date.now() + 350;
+            cameraLockUntil = Date.now() + 650;
 
             const clustersBefore = clusterPositions(drawHistory);
 
