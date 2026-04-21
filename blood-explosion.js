@@ -83,10 +83,20 @@
     const origDraw = CanvasRenderingContext2D.prototype.drawImage;
     const origFillRect = CanvasRenderingContext2D.prototype.fillRect;
     const origSetTransform = CanvasRenderingContext2D.prototype.setTransform;
+    const origScale = CanvasRenderingContext2D.prototype.scale;
+    const origTranslate = CanvasRenderingContext2D.prototype.translate;
 
-    // Freeze the camera transform during lock window.
-    // The game sets its camera via setTransform(zoom, 0, 0, zoom, offsetX, offsetY) each frame.
-    // We identify camera calls by a > 1 (zoom > 1). Non-camera calls (identity reset) pass through.
+    // Freeze the camera transform during the lock window.
+    // Three intercepts cover the main patterns games use to set a camera:
+    //   1. setTransform(zoom, 0, 0, zoom, offsetX, offsetY)  — combined zoom+pan
+    //   2. scale(zoom, zoom); translate(offsetX, offsetY)    — separate calls, scale first
+    //   3. translate(offsetX, offsetY); scale(zoom, zoom)    — separate calls, translate first
+    // Camera calls are identified by zoom > 1. Identity resets (zoom = 1) pass through unchanged.
+
+    let awaitingCameraTranslate = false; // true after a zoom-scale, to catch the paired translate
+    let lockedScaleArgs = null;
+    let lockedCameraTranslateArgs = null;
+
     CanvasRenderingContext2D.prototype.setTransform = function (a, b, c, d, e, f) {
       if (this.canvas !== overlayCanvas && a > 1) {
         if (Date.now() < cameraLockUntil && lockedCameraArgs) {
@@ -95,6 +105,32 @@
         lockedCameraArgs = [a, b, c, d, e, f];
       }
       return origSetTransform.apply(this, arguments);
+    };
+
+    CanvasRenderingContext2D.prototype.scale = function (x, y) {
+      if (this.canvas !== overlayCanvas && x > 1 && x === y) {
+        if (Date.now() < cameraLockUntil && lockedScaleArgs) {
+          awaitingCameraTranslate = true;
+          return origScale.apply(this, lockedScaleArgs);
+        }
+        lockedScaleArgs = [x, y];
+        awaitingCameraTranslate = true;
+      }
+      return origScale.apply(this, arguments);
+    };
+
+    // Catches the translate paired with a zoom scale (pattern 2).
+    // awaitingCameraTranslate is set by scale() and cleared after the first translate that follows,
+    // so only the camera-pan translate is intercepted — not per-sprite translates.
+    CanvasRenderingContext2D.prototype.translate = function (x, y) {
+      if (this.canvas !== overlayCanvas && awaitingCameraTranslate) {
+        awaitingCameraTranslate = false;
+        if (Date.now() < cameraLockUntil && lockedCameraTranslateArgs) {
+          return origTranslate.apply(this, lockedCameraTranslateArgs);
+        }
+        lockedCameraTranslateArgs = [x, y];
+      }
+      return origTranslate.apply(this, arguments);
     };
 
     // Suppress the game's despawn (matrix-rain) animation.
