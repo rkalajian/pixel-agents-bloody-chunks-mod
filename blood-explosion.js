@@ -13,6 +13,10 @@
   const CHUNK_SIZES = [2, 2, 3, 3, 4, 5];
   const SPLAT_COUNT = 12;
   const FLASH_FRAMES = 8;
+  // How long to fade out the frozen game-canvas snapshot (ms).
+  // During the fade the pre-close view is visible behind the particles, so the
+  // explosion always appears at the correct position regardless of camera panning.
+  const SNAPSHOT_FADE_MS = 700;
 
   // Spatial tolerance for clustering (px). Must be < gap between character and desk sprite centers.
   // At zoom=4: character center Y = seatRow*64-8, desk center Y = seatRow*64 → 8px gap.
@@ -27,13 +31,12 @@
   let rafId = null;
   let drawHistory = [];
   // Suppress the game's built-in despawn (matrix-rain) animation after agent close.
-  // xr() draws it using fillRect(x, y, zoom, zoom) — tiny squares, no other render path uses them.
+  // xr() renders it as fillRect(x, y, zoom, zoom) — tiny squares, no other render path uses them.
   let despawnSuppressUntil = 0;
-  // Freeze the camera transform after agent close so the view doesn't re-pan.
-  // The game calls setTransform(zoom, 0, 0, zoom, offsetX, offsetY) each frame to position the camera.
-  // Locking it prevents the "center on empty room" re-pan that misaligns the explosion.
-  let cameraLockUntil = 0;
-  let lockedCameraArgs = null;
+  // Snapshot of the game canvas captured synchronously on agentClosed, drawn on the overlay
+  // with a fade so the explosion lands on the correct pre-close view even if the camera pans.
+  let snapshot = null;       // HTMLCanvasElement holding the frozen frame
+  let snapshotStart = 0;     // Date.now() when snapshot was taken
 
   // --- overlay setup ---
 
@@ -82,56 +85,6 @@
   function interceptDrawImage() {
     const origDraw = CanvasRenderingContext2D.prototype.drawImage;
     const origFillRect = CanvasRenderingContext2D.prototype.fillRect;
-    const origSetTransform = CanvasRenderingContext2D.prototype.setTransform;
-    const origScale = CanvasRenderingContext2D.prototype.scale;
-    const origTranslate = CanvasRenderingContext2D.prototype.translate;
-
-    // Freeze the camera transform during the lock window.
-    // Three intercepts cover the main patterns games use to set a camera:
-    //   1. setTransform(zoom, 0, 0, zoom, offsetX, offsetY)  — combined zoom+pan
-    //   2. scale(zoom, zoom); translate(offsetX, offsetY)    — separate calls, scale first
-    //   3. translate(offsetX, offsetY); scale(zoom, zoom)    — separate calls, translate first
-    // Camera calls are identified by zoom > 1. Identity resets (zoom = 1) pass through unchanged.
-
-    let awaitingCameraTranslate = false; // true after a zoom-scale, to catch the paired translate
-    let lockedScaleArgs = null;
-    let lockedCameraTranslateArgs = null;
-
-    CanvasRenderingContext2D.prototype.setTransform = function (a, b, c, d, e, f) {
-      if (this.canvas !== overlayCanvas && a > 1) {
-        if (Date.now() < cameraLockUntil && lockedCameraArgs) {
-          return origSetTransform.apply(this, lockedCameraArgs);
-        }
-        lockedCameraArgs = [a, b, c, d, e, f];
-      }
-      return origSetTransform.apply(this, arguments);
-    };
-
-    CanvasRenderingContext2D.prototype.scale = function (x, y) {
-      if (this.canvas !== overlayCanvas && x > 1 && x === y) {
-        if (Date.now() < cameraLockUntil && lockedScaleArgs) {
-          awaitingCameraTranslate = true;
-          return origScale.apply(this, lockedScaleArgs);
-        }
-        lockedScaleArgs = [x, y];
-        awaitingCameraTranslate = true;
-      }
-      return origScale.apply(this, arguments);
-    };
-
-    // Catches the translate paired with a zoom scale (pattern 2).
-    // awaitingCameraTranslate is set by scale() and cleared after the first translate that follows,
-    // so only the camera-pan translate is intercepted — not per-sprite translates.
-    CanvasRenderingContext2D.prototype.translate = function (x, y) {
-      if (this.canvas !== overlayCanvas && awaitingCameraTranslate) {
-        awaitingCameraTranslate = false;
-        if (Date.now() < cameraLockUntil && lockedCameraTranslateArgs) {
-          return origTranslate.apply(this, lockedCameraTranslateArgs);
-        }
-        lockedCameraTranslateArgs = [x, y];
-      }
-      return origTranslate.apply(this, arguments);
-    };
 
     // Suppress the game's despawn (matrix-rain) animation.
     // xr() renders it as fillRect(x, y, a, a) where a=zoom (≤8px). No other path uses sub-16px squares.
@@ -163,6 +116,17 @@
       }
       return result;
     };
+  }
+
+  // Capture the current game canvas into an offscreen canvas for use as a snapshot.
+  function captureSnapshot() {
+    if (!gameCanvas) return;
+    const cvs = document.createElement('canvas');
+    cvs.width = gameCanvas.width;
+    cvs.height = gameCanvas.height;
+    cvs.getContext('2d').drawImage(gameCanvas, 0, 0);
+    snapshot = cvs;
+    snapshotStart = Date.now();
   }
 
   // Cluster drawHistory entries by spatial proximity.
@@ -244,6 +208,20 @@
       overlayCtx.clearRect(0, 0, w, h);
       overlayCtx.imageSmoothingEnabled = false;
 
+      // Draw the frozen game-canvas snapshot under everything else, fading out over SNAPSHOT_FADE_MS.
+      // This keeps the pre-close view visible behind the explosion so particles appear at the right
+      // position even if the game camera re-pans after the last agent is removed.
+      if (snapshot) {
+        const elapsed = Date.now() - snapshotStart;
+        if (elapsed < SNAPSHOT_FADE_MS) {
+          overlayCtx.globalAlpha = 1 - elapsed / SNAPSHOT_FADE_MS;
+          overlayCtx.drawImage(snapshot, 0, 0);
+          overlayCtx.globalAlpha = 1;
+        } else {
+          snapshot = null;
+        }
+      }
+
       for (let i = flashes.length - 1; i >= 0; i--) {
         const f = flashes[i];
         f.life--;
@@ -285,10 +263,15 @@
         try {
           const d = event.data;
           if (d && d.type === 'agentClosed') {
-            // Flash + suppress matrix-rain despawn + lock camera position.
+            // Flash + suppress matrix-rain despawn.
             flashes.push({ life: FLASH_FRAMES, maxLife: FLASH_FRAMES });
             despawnSuppressUntil = Date.now() + 350;
-            cameraLockUntil = Date.now() + 650;
+
+            // Snapshot the game canvas before passing the event to the game.
+            // The snapshot is drawn on the overlay with a fade so the explosion
+            // particles always appear over the correct pre-close view, regardless
+            // of how or when the game camera pans afterward.
+            captureSnapshot();
 
             const clustersBefore = clusterPositions(drawHistory);
 
@@ -298,13 +281,10 @@
               spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200);
             } else {
               // Fire synchronously at the character cluster (lowest Y = above desk).
-              // This runs in the message handler before any RAF re-render, so coordinates
-              // are valid even when the game re-pans after the last agent is removed.
               const charCluster = clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
               spawnExplosion(charCluster.x, charCluster.y);
 
-              // For multi-agent: also diff to fire at the actual closed agent if it's
-              // a different position than the one we just fired at.
+              // For multi-agent: diff to also fire at the actual closed agent if different.
               drawHistory = [];
               let waited = 0;
               const check = () => {
@@ -312,15 +292,13 @@
                 const clustersAfter = clusterPositions(drawHistory);
                 if (clustersAfter.length === 0) {
                   if (waited < 3) { requestAnimationFrame(check); return; }
-                  return; // last agent — already handled by synchronous fire above
+                  return; // last agent — synchronous fire above was correct
                 }
                 const missing = clustersAfter.length < clustersBefore.length
                   ? findMissingCluster(clustersBefore, clustersAfter)
                   : null;
                 if (!missing && waited < 12) { requestAnimationFrame(check); return; }
                 if (missing) {
-                  // Only fire a second explosion if diff found a meaningfully different position
-                  // (i.e. a non-topmost agent closed in a multi-agent scenario).
                   const dist = Math.hypot(missing.x - charCluster.x, missing.y - charCluster.y);
                   if (dist > CLUSTER_THRESHOLD * 4) spawnExplosion(missing.x, missing.y);
                 }
