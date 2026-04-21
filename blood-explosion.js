@@ -29,6 +29,7 @@
   let flashes = [];
   let drawHistory = [];
   let despawnSuppressUntil = 0;
+  let lastAgentClosedAt = 0;
 
   // Snapshot of the game canvas captured synchronously on agentClosed.
   // snapshotHold=true: keep at opacity 1 until all particles die (last-agent case, camera pans).
@@ -39,6 +40,13 @@
   let snapshotHold = false;
   let snapshotFadeOutStart = 0;
   const SNAPSHOT_FADEOUT_MS = 300;
+
+  // Camera transform tracking — updated every frame via setTransform intercept.
+  // Used to pan particles with the camera so they stay anchored to world space.
+  let currentCameraE  = 0;
+  let currentCameraF  = 0;
+  let snapshotCameraE = 0;
+  let snapshotCameraF = 0;
 
   // --- overlay setup ---
 
@@ -78,8 +86,17 @@
   // --- canvas intercepts ---
 
   function interceptCanvas() {
-    const origDraw     = CanvasRenderingContext2D.prototype.drawImage;
-    const origFillRect = CanvasRenderingContext2D.prototype.fillRect;
+    const origDraw         = CanvasRenderingContext2D.prototype.drawImage;
+    const origFillRect     = CanvasRenderingContext2D.prototype.fillRect;
+    const origSetTransform = CanvasRenderingContext2D.prototype.setTransform;
+
+    CanvasRenderingContext2D.prototype.setTransform = function (a, b, c, d, e, f) {
+      if (this.canvas !== overlayCanvas && typeof a === 'number' && a > 1) {
+        currentCameraE = e;
+        currentCameraF = f;
+      }
+      return origSetTransform.apply(this, arguments);
+    };
 
     // Suppress the game's despawn (matrix-rain) animation.
     CanvasRenderingContext2D.prototype.fillRect = function (x, y, w, h) {
@@ -87,10 +104,10 @@
       return origFillRect.apply(this, arguments);
     };
 
-    // Track 2:1 sprites to detect agent positions.
+    // Track 2:1 sprites to detect agent positions (game canvas only).
     CanvasRenderingContext2D.prototype.drawImage = function (...args) {
       const result = origDraw.apply(this, args);
-      if (this.canvas === overlayCanvas) return result;
+      if (this.canvas !== gameCanvas) return result;
       if (args.length === 3) {
         const img = args[0];
         const dw = img.width || img.naturalWidth || 0;
@@ -116,6 +133,8 @@
     snapshotFadeMs     = 700;
     snapshotHold       = false;
     snapshotFadeOutStart = 0;
+    snapshotCameraE    = currentCameraE;
+    snapshotCameraF    = currentCameraF;
   }
 
   function clusterPositions(history) {
@@ -229,6 +248,13 @@
         overlayCtx.fillRect(0, 0, w, h);
       }
 
+      // Camera pan delta since snapshot — keeps particles anchored to world space.
+      const panX = currentCameraE - snapshotCameraE;
+      const panY = currentCameraF - snapshotCameraF;
+      if (!snapshotHold && snapshot && particles.length > 0 && (Math.abs(panX) > 4 || Math.abs(panY) > 4)) {
+        snapshotHold = true;
+      }
+
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
         if (--p.life <= 0) { particles.splice(i, 1); continue; }
@@ -236,7 +262,7 @@
         const t = p.life / p.maxLife;
         overlayCtx.globalAlpha = p.splat ? Math.min(1, t * 3) : t;
         overlayCtx.fillStyle = p.color;
-        overlayCtx.fillRect(Math.round(p.x - p.size * 0.5), Math.round(p.y - p.size * 0.5), p.size, p.size);
+        overlayCtx.fillRect(Math.round(p.x + panX - p.size * 0.5), Math.round(p.y + panY - p.size * 0.5), p.size, p.size);
       }
 
       overlayCtx.globalAlpha = 1;
@@ -253,51 +279,100 @@
         try {
           const d = event.data;
           if (d && d.type === 'agentClosed') {
+            // Guard against the game having multiple message listeners — each would
+            // process agentClosed independently, causing duplicate explosions and
+            // overwriting snapshotHold via the second captureSnapshot() call.
+            const now = Date.now();
+            if (now - lastAgentClosedAt < 100) return listener.call(this, event);
+            lastAgentClosedAt = now;
+
             flashes.push({ life: FLASH_FRAMES, maxLife: FLASH_FRAMES });
             despawnSuppressUntil = Date.now() + 350;
             captureSnapshot();
 
             const clustersBefore = clusterPositions(drawHistory);
+            console.log('[blood-explosion] agentClosed — clusters:', clustersBefore.length, clustersBefore.map(c => `(${Math.round(c.x)},${Math.round(c.y)})`).join(' '), '| cameraE:', Math.round(currentCameraE), 'F:', Math.round(currentCameraF));
 
             if (clustersBefore.length === 0) {
-              const c = getCanvas();
-              // No history — single agent, hold snapshot.
+              // No draw history — fire at canvas center, hold snapshot.
               snapshotHold = true;
+              const c = getCanvas();
               spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200, false);
               return listener.call(this, event);
             }
 
-            const charCluster = clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
-            const agentCount  = Math.round(clustersBefore.length / SPRITES_PER_AGENT);
+            // Defer explosion: diff before/after to find exact agent position.
+            // snapshotHold=true keeps snapshot frozen while we wait and while particles live.
+            snapshotHold = true;
+            drawHistory = [];
+            let waited = 0;
+            const check = () => {
+              waited++;
+              const clustersAfter = clusterPositions(drawHistory);
 
-            if (agentCount <= 1) {
-              // Single agent: fire and hold snapshot — no diff check needed, nothing
-              // to diff against, and spurious UI sprites would trigger false explosions.
-              snapshotHold = true;
-              spawnExplosion(charCluster.x, charCluster.y, false);
-            } else {
-              // Multiple agents: run diff to find the one that vanished.
-              // Short snapshot fade is fine — the camera doesn't pan when agents remain.
-              spawnExplosion(charCluster.x, charCluster.y);
-              drawHistory = [];
-              let waited = 0;
-              const check = () => {
-                waited++;
-                const clustersAfter = clusterPositions(drawHistory);
-                if (clustersAfter.length === 0) {
-                  if (waited < 3) { requestAnimationFrame(check); return; }
-                  return;
-                }
-                const missing = clustersAfter.length < clustersBefore.length
-                  ? findMissingCluster(clustersBefore, clustersAfter) : null;
-                if (!missing && waited < 12) { requestAnimationFrame(check); return; }
+              if (clustersAfter.length === 0) {
+                if (waited < 5) { requestAnimationFrame(check); return; }
+                // Nothing rendered — fire at nearest-to-center visible pre-close cluster.
+                const c = getCanvas();
+                const w = c ? c.width : 400, h = c ? c.height : 400;
+                const cx = w * 0.5, cy = h * 0.5;
+                const vis = clustersBefore.filter(cl => cl.x >= 0 && cl.x <= w && cl.y >= 0 && cl.y <= h);
+                const tgt = vis.length
+                  ? vis.reduce((a, b) => Math.hypot(b.x - cx, b.y - cy) < Math.hypot(a.x - cx, a.y - cy) ? b : a)
+                  : { x: cx, y: cy };
+                spawnExplosion(tgt.x, tgt.y, false);
+                return;
+              }
+
+              const cameraPanned = Math.abs(currentCameraE - snapshotCameraE) > 4 ||
+                                   Math.abs(currentCameraF - snapshotCameraF) > 4;
+              const cameraShifted = cameraPanned || clustersAfter.some(a =>
+                !clustersBefore.some(b =>
+                  Math.abs(a.x - b.x) < CLUSTER_THRESHOLD * 2 &&
+                  Math.abs(a.y - b.y) < CLUSTER_THRESHOLD * 2
+                )
+              );
+              console.log('[blood-explosion] check waited:', waited, '| clustersAfter:', clustersAfter.length, '| cameraShifted:', cameraShifted);
+
+              if (cameraShifted) {
+                // Last agent — estimate pan via voting, then find the missing cluster.
+                const Q = CLUSTER_THRESHOLD * 2;
+                const votes = new Map();
+                for (const a of clustersAfter)
+                  for (const b of clustersBefore) {
+                    const key = `${Math.round((a.x - b.x) / Q) * Q},${Math.round((a.y - b.y) / Q) * Q}`;
+                    votes.set(key, (votes.get(key) || 0) + 1);
+                  }
+                const sorted = [...votes.entries()].sort((a, b) => b[1] - a[1]);
+                const [estPanX, estPanY] = sorted.length ? sorted[0][0].split(',').map(Number) : [0, 0];
+                const missing = clustersBefore.find(b =>
+                  !clustersAfter.some(a =>
+                    Math.abs(a.x - (b.x + estPanX)) < CLUSTER_THRESHOLD * 3 &&
+                    Math.abs(a.y - (b.y + estPanY)) < CLUSTER_THRESHOLD * 3
+                  )
+                );
+                console.log('[blood-explosion] last-agent pan:', Math.round(estPanX), Math.round(estPanY), '| missing:', missing ? `(${Math.round(missing.x)},${Math.round(missing.y)})` : 'none');
                 if (missing) {
-                  const dist = Math.hypot(missing.x - charCluster.x, missing.y - charCluster.y);
-                  if (dist > CLUSTER_THRESHOLD * 4) spawnExplosion(missing.x, missing.y);
+                  spawnExplosion(missing.x, missing.y, false);
+                } else {
+                  const c = getCanvas();
+                  spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200, false);
                 }
-              };
-              requestAnimationFrame(check);
-            }
+                return; // snapshotHold stays true
+              }
+
+              // Camera stable → agents remain; find which one disappeared.
+              const missing = clustersAfter.length < clustersBefore.length
+                ? findMissingCluster(clustersBefore, clustersAfter) : null;
+              if (!missing && waited < 12) { requestAnimationFrame(check); return; }
+              if (missing) {
+                console.log('[blood-explosion] burst at', Math.round(missing.x), Math.round(missing.y));
+                snapshotHold = false;
+                snapshotStart = Date.now();
+                spawnExplosion(missing.x, missing.y);
+              }
+            };
+            requestAnimationFrame(check);
           }
         } catch (e) { console.error('[blood-explosion] error:', e); }
         return listener.call(this, event);
