@@ -13,9 +13,6 @@
   const CHUNK_SIZES = [2, 2, 3, 3, 4, 5];
   const SPLAT_COUNT = 12;
   const FLASH_FRAMES = 8;
-  // How long to delay passing agentClosed to the game's own listener (ms).
-  // During this window the game doesn't re-center, keeping explosion coordinates valid.
-  const CLOSE_DELAY = 600;
 
   // Spatial tolerance for clustering (px). Must be < gap between character and desk sprite centers.
   // At zoom=4: character center Y = seatRow*64-8, desk center Y = seatRow*64 → 8px gap.
@@ -288,18 +285,10 @@
         try {
           const d = event.data;
           if (d && d.type === 'agentClosed') {
-            // Flash immediately. Delay passing the event to the game's own listener
-            // by CLOSE_DELAY ms — during that window the game doesn't know the agent
-            // closed, so the camera stays put and coordinates remain valid for the
-            // explosion. despawnSuppressUntil and cameraLockUntil are set at
-            // delivery time to cover the actual despawn and any residual re-pan.
+            // Flash + suppress matrix-rain despawn + lock camera position.
             flashes.push({ life: FLASH_FRAMES, maxLife: FLASH_FRAMES });
-            const self = this;
-            setTimeout(() => {
-              despawnSuppressUntil = Date.now() + 350;
-              cameraLockUntil = Date.now() + 400;
-              listener.call(self, event);
-            }, CLOSE_DELAY);
+            despawnSuppressUntil = Date.now() + 350;
+            cameraLockUntil = Date.now() + 650;
 
             const clustersBefore = clusterPositions(drawHistory);
 
@@ -338,7 +327,6 @@
               };
               requestAnimationFrame(check);
             }
-            return; // game listener delivered via setTimeout above
           }
         } catch (e) { console.error('[blood-explosion] error:', e); }
         return listener.call(this, event);
