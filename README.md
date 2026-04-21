@@ -90,19 +90,30 @@ Edit `blood-explosion.js` before installing. Constants at the top of the file:
 
 | Constant | Default | Effect |
 |---|---|---|
-| `PARTICLE_COUNT` | `48` | Number of flying chunks per explosion |
-| `CHUNK_LIFETIME` | `150` | How long chunks stay on screen (frames at ~60fps ≈ 2.5s) |
-| `SPLAT_COUNT` | `12` | Number of blood splat marks left on the ground |
+| `PARTICLE_COUNT` | `48` | Flying chunks per explosion |
+| `CHUNK_LIFETIME` | `150` | Chunk lifespan (frames at ~60fps ≈ 2.5s) |
+| `SPLAT_COUNT` | `12` | Blood splat marks left on the ground |
 | `GRAVITY` | `0.35` | Downward acceleration on chunks |
 | `DRAG` | `0.975` | Horizontal drag on chunks |
+| `FLASH_FRAMES` | `8` | White flash duration at explosion origin |
+| `CLUSTER_THRESHOLD` | `6` | Max px spread to group draw calls into one agent position |
+| `SNAPSHOT_FADEOUT_MS` | `300` | Fade duration (ms) after snapshot releases |
 
 ## How it works
 
 The mod injects into the webview before the React bundle loads. It:
 
-1. **Intercepts `CanvasRenderingContext2D.prototype.drawImage`** to track which 2:1-ratio sprites (character height = 2× width) are being drawn each frame and where.
-2. **On `agentClosed` message**, snapshots those sprite positions, resets tracking, then diffs against the next few frames to identify which position disappeared — that's the closed agent.
-3. **Spawns a particle explosion** at that position on a transparent overlay canvas layered above the game canvas.
-4. **Suppresses the built-in despawn animation** by intercepting `fillRect` calls that match the matrix-rain effect's pixel size for 350ms after close.
+1. **Intercepts three canvas methods** — `drawImage`, `fillRect`, and `setTransform`:
+   - `drawImage`: tracks 2:1-ratio sprites (character height = 2× width) each frame to locate agents.
+   - `fillRect`: suppresses the built-in matrix-rain despawn animation for 350ms after a close.
+   - `setTransform`: records camera position (`e`/`f` translation components) every frame so particle world-anchoring can compensate for camera pans.
 
-The position-detection handles multiple simultaneous agents correctly by using spatial clustering with a tight 6px threshold (tight enough to separate a sitting character from the desk sprite directly behind them, which differs by only 8px in Y at the default zoom level). When the last agent closes and all sprites vanish, the explosion targets the character sprite by selecting the cluster with the lowest Y coordinate (the character sits above its desk).
+2. **On `agentClosed` message**, captures a canvas snapshot synchronously, then defers the explosion check up to 12 animation frames. Each deferred frame clusters current sprite positions and diffs against the pre-close snapshot to identify which cluster disappeared — that's the closed agent.
+
+3. **Camera-pan compensation** — if the camera moves >4px while particles are alive, particle positions are offset each frame by the delta from their spawn camera position, keeping them anchored to the world rather than drifting with the view.
+
+4. **Snapshot hold** — a frozen copy of the game canvas renders behind the particles. For mid-session closes (camera stable) it fades linearly over 700ms. For last-agent closes or any close where the camera pans, the snapshot holds at full opacity until every particle dies, then fades over 300ms. This prevents the game from snapping to an empty room mid-explosion.
+
+5. **Last-agent detection** — when all sprites vanish after a close (no clusters in the diff's "after" frame), the mod targets the lowest-Y cluster from the pre-close snapshot (the character sprite, which sits above its desk). A voting-based pan estimator compares pre- and post-close cluster positions to correct for any camera jump before pinning the explosion origin.
+
+Position detection uses spatial clustering with a 6px threshold — tight enough to separate a sitting character from the desk sprite behind it (which differs by only ~8px in Y at default zoom).
