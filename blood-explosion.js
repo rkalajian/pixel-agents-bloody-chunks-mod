@@ -241,19 +241,23 @@
               const c = getCanvas();
               spawnExplosion(c ? c.width * 0.5 : 200, c ? c.height * 0.5 : 200);
             } else {
-              // Diff: reset history, wait 3 frames, find which cluster vanished.
+              // Diff: reset history, wait for next frames, find which cluster vanished.
               drawHistory = [];
               let waited = 0;
 
               const check = () => {
                 waited++;
-                // Need at least 3 frames AND some fresh data.
-                if (waited < 3 || (drawHistory.length === 0 && waited < 12)) {
-                  requestAnimationFrame(check);
+                const clustersAfter = clusterPositions(drawHistory);
+
+                if (clustersAfter.length === 0) {
+                  // No sprites drawn — last/only agent closed. Fire immediately before
+                  // the game re-renders at panned/centered coordinates (waiting longer
+                  // causes the explosion to land in the wrong visual position).
+                  if (waited < 2) { requestAnimationFrame(check); return; }
+                  const target = clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
+                  spawnExplosion(target.x, target.y);
                   return;
                 }
-
-                const clustersAfter = clusterPositions(drawHistory);
 
                 const missing = clustersAfter.length < clustersBefore.length
                   ? findMissingCluster(clustersBefore, clustersAfter)
@@ -264,7 +268,7 @@
                   return;
                 }
 
-                const target = missing || clustersBefore[clustersBefore.length - 1];
+                const target = missing || clustersBefore.reduce((a, b) => b.y < a.y ? b : a);
                 spawnExplosion(target.x, target.y);
               };
 
