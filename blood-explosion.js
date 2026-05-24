@@ -9,9 +9,10 @@
   const GRAVITY = 0.35;
   const DRAG = 0.975;
   const BLOOD_COLORS = ['#cc0000', '#880000', '#ff1111', '#aa0000', '#660000', '#ff3333', '#8b0000', '#b30000'];
+  const POOP_BLOOD_COLORS = ['#4a2800', '#6b3a1f', '#8b4513', '#7b3f00', '#5c2e00', '#a0522d', '#3d1c02', '#9c4a1a'];
   const BONE_COLORS = ['#e8e0c8', '#d4cbb0', '#f0ead8'];
   const CHUNK_SIZES = [2, 2, 3, 3, 4, 5];
-  const SPLAT_COUNT = 12;
+  const SPLAT_COUNT = 18;
   const FLASH_FRAMES = 8;
 
   // Spatial tolerance for clustering (px). Must be < gap between character and desk sprite centers.
@@ -21,6 +22,8 @@
   // Each agent contributes ~2 sprite clusters (character + desk). Used to decide
   // whether a diff check is worth running after close.
   const SPRITES_PER_AGENT = 2;
+
+  let nextExplosionIsPoop = false;
 
   let overlayCanvas = null;
   let overlayCtx = null;
@@ -160,6 +163,10 @@
   // --- particle spawn ---
 
   function spawnExplosion(x, y, withSplats = true) {
+    const isPoop = nextExplosionIsPoop;
+    nextExplosionIsPoop = false;
+    const activeBloodColors = isPoop ? POOP_BLOOD_COLORS : BLOOD_COLORS;
+
     for (let i = 0; i < PARTICLE_COUNT; i++) {
       const angle  = Math.random() * Math.PI * 2;
       const isBone = Math.random() < 0.18;
@@ -171,7 +178,7 @@
         vy: Math.sin(angle) * speed - (1 + Math.random() * 3),
         color: isBone
           ? BONE_COLORS[Math.floor(Math.random() * BONE_COLORS.length)]
-          : BLOOD_COLORS[Math.floor(Math.random() * BLOOD_COLORS.length)],
+          : activeBloodColors[Math.floor(Math.random() * activeBloodColors.length)],
         size,
         life: CHUNK_LIFETIME + Math.floor(Math.random() * 25),
         maxLife: CHUNK_LIFETIME + 25,
@@ -186,7 +193,7 @@
           x: x + Math.cos(angle) * dist,
           y: y + Math.sin(angle) * dist + 10,
           vx: 0, vy: 0,
-          color: BLOOD_COLORS[Math.floor(Math.random() * 3)],
+          color: activeBloodColors[Math.floor(Math.random() * 3)],
           size: 1 + Math.floor(Math.random() * 4),
           life: CHUNK_LIFETIME * 4,
           maxLife: CHUNK_LIFETIME * 4,
@@ -244,7 +251,7 @@
         const f = flashes[i];
         if (--f.life <= 0) { flashes.splice(i, 1); continue; }
         overlayCtx.globalAlpha = (f.life / f.maxLife) * 0.35;
-        overlayCtx.fillStyle = '#ff0000';
+        overlayCtx.fillStyle = f.color || '#ff0000';
         overlayCtx.fillRect(0, 0, w, h);
       }
 
@@ -286,7 +293,8 @@
             if (now - lastAgentClosedAt < 100) return listener.call(this, event);
             lastAgentClosedAt = now;
 
-            flashes.push({ life: FLASH_FRAMES, maxLife: FLASH_FRAMES });
+            if (window.__bathroomBreakMod?.isAgentOnToilet?.(d.agentId)) nextExplosionIsPoop = true;
+            flashes.push({ life: FLASH_FRAMES, maxLife: FLASH_FRAMES, color: nextExplosionIsPoop ? '#6b3a1f' : '#ff0000' });
             despawnSuppressUntil = Date.now() + 350;
             captureSnapshot();
 

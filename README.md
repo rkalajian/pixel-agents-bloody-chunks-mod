@@ -99,6 +99,12 @@ Edit `blood-explosion.js` before installing. Constants at the top of the file:
 | `CLUSTER_THRESHOLD` | `6` | Max px spread to group draw calls into one agent position |
 | `SNAPSHOT_FADEOUT_MS` | `300` | Fade duration (ms) after snapshot releases |
 
+## Mod compatibility
+
+### bathroom-break
+
+When the [bathroom-break mod](../bathroom-break) is also installed and an agent is deleted while sitting on a toilet, the explosion uses **brown chunk and blood stain colors** instead of red — representing the, uh, mixed biological material. The flash tint also shifts to brown. No configuration needed; detection is automatic via `window.__bathroomBreakMod.isAgentOnToilet()`.
+
 ## How it works
 
 The mod injects into the webview before the React bundle loads. It:
