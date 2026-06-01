@@ -18,10 +18,13 @@ When an agent is dispatched, it explodes into bloody pixel chunks instead of qui
 ./install.sh
 ```
 
-The script:
-1. Backs up the extension's `index.html` to `index.html.bak`
-2. Copies `blood-explosion.js` into the extension's assets directory
-3. Injects the `<script>` tag before the main bundle
+The script automatically:
+1. Locates your pixel-agents extension (any installed version)
+2. Backs up the extension's `index.html` to `index.html.bak`
+3. Copies `blood-explosion.js` into the extension's assets directory
+4. Injects the `<script>` tag before the main bundle
+
+**No version numbers needed** — the script detects your extension version automatically.
 
 Then reload VS Code: **Cmd+Shift+P** → `Developer: Reload Window`
 
@@ -32,6 +35,10 @@ The mod is active when you see this in the webview developer console:
 ```
 
 ### Manual
+
+**Note:** Use the scripted approach above unless you have a specific reason to install manually. The script handles version detection and all setup automatically.
+
+If installing manually, follow these steps:
 
 #### 1. Find your pixel-agents extension directory
 
@@ -92,7 +99,7 @@ Edit `blood-explosion.js` before installing. Constants at the top of the file:
 |---|---|---|
 | `PARTICLE_COUNT` | `48` | Flying chunks per explosion |
 | `CHUNK_LIFETIME` | `150` | Chunk lifespan (frames at ~60fps ≈ 2.5s) |
-| `SPLAT_COUNT` | `12` | Blood splat marks left on the ground |
+| `SPLAT_COUNT` | `18` | Blood splat marks left on the ground |
 | `GRAVITY` | `0.35` | Downward acceleration on chunks |
 | `DRAG` | `0.975` | Horizontal drag on chunks |
 | `FLASH_FRAMES` | `8` | White flash duration at explosion origin |
