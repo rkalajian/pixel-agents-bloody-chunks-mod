@@ -7,6 +7,17 @@ When an agent is dispatched, it explodes into bloody pixel chunks instead of qui
 ## Requirements
 
 - VS Code with [pixel-agents](https://marketplace.visualstudio.com/items?itemName=pablodelucca.pixel-agents) installed (tested on v1.3.0)
+- [pixel-agents-mod-loader](https://github.com/rkalajian/pixel-agents-mod-loader) — required for this mod to load and execute
+
+## Mod Installation Location
+
+This mod must be installed to:
+
+```
+~/.pixel-agents/mods/pixel-agents-bloody-chunks-mod/
+```
+
+The mod-loader scans this directory for mods and injects them into pixel-agents automatically. If you cloned this repository elsewhere, symlink or copy it to the location above.
 
 ## Installation
 
