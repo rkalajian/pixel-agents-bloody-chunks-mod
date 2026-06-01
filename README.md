@@ -7,35 +7,17 @@ When an agent is dispatched, it explodes into bloody pixel chunks instead of qui
 ## Requirements
 
 - VS Code with [pixel-agents](https://marketplace.visualstudio.com/items?itemName=pablodelucca.pixel-agents) installed (tested on v1.3.0)
-- [pixel-agents-mod-loader](https://github.com/rkalajian/pixel-agents-mod-loader) — required for this mod to load and execute
-
-## Mod Installation Location
-
-This mod must be installed to:
-
-```
-~/.pixel-agents/mods/pixel-agents-bloody-chunks-mod/
-```
-
-The mod-loader scans this directory for mods and injects them into pixel-agents automatically. If you cloned this repository elsewhere, symlink or copy it to the location above.
 
 ## Installation
 
-**Note:** This mod edits files inside the installed extension. You will need to re-apply it after every pixel-agents update.
-
-### Scripted (recommended)
+Clone or copy this repository to pixel-agents' mods directory:
 
 ```bash
-./install.sh
+git clone https://github.com/rkalajian/pixel-agents-bloody-chunks-mod \
+  ~/.pixel-agents/mods/pixel-agents-bloody-chunks-mod
 ```
 
-The script automatically:
-1. Locates your pixel-agents extension (any installed version)
-2. Backs up the extension's `index.html` to `index.html.bak`
-3. Copies `blood-explosion.js` into the extension's assets directory
-4. Injects the `<script>` tag before the main bundle
-
-**No version numbers needed** — the script detects your extension version automatically.
+pixel-agents' built-in mod loader scans `~/.pixel-agents/mods/` on startup, reads `manifest.json`, and injects the listed scripts into the webview automatically. No further steps required.
 
 Then reload VS Code: **Cmd+Shift+P** → `Developer: Reload Window`
 
@@ -45,62 +27,37 @@ The mod is active when you see this in the webview developer console:
 [blood-explosion] Mod loaded — agents die violently now.
 ```
 
-### Manual
+### Manual injection (fallback)
 
-**Note:** Use the scripted approach above unless you have a specific reason to install manually. The script handles version detection and all setup automatically.
-
-If installing manually, follow these steps:
-
-#### 1. Find your pixel-agents extension directory
+If your pixel-agents version doesn't support the built-in mod loader, use the included script to patch the extension directly:
 
 ```bash
-ls ~/.vscode/extensions/ | grep pixel-agents
+./install.sh
 ```
 
-The directory will be something like `pablodelucca.pixel-agents-1.3.0`. The full path is:
+The script:
+1. Locates your pixel-agents extension (any installed version)
+2. Backs up the extension's `index.html` to `index.html.bak`
+3. Copies `blood-explosion.js` into the extension's assets directory
+4. Injects the `<script>` tag before the main bundle
 
-```
-~/.vscode/extensions/pablodelucca.pixel-agents-1.3.0/dist/webview/
-```
-
-#### 2. Copy the script
-
-```bash
-cp blood-explosion.js ~/.vscode/extensions/pablodelucca.pixel-agents-1.3.0/dist/webview/assets/
-```
-
-Replace `1.3.0` with your installed version.
-
-#### 3. Inject the script tag
-
-Edit `~/.vscode/extensions/pablodelucca.pixel-agents-1.3.0/dist/webview/index.html` and add one line inside `<head>`, **before** the main `index-*.js` script:
-
-```html
-<head>
-  ...
-  <script src="./assets/blood-explosion.js"></script>   <!-- add this line -->
-  <script type="module" crossorigin src="./assets/index-BUrEakFE.js"></script>
-  ...
-</head>
-```
-
-#### 4. Reload the extension
-
-In VS Code: **Ctrl+Shift+P** (or **Cmd+Shift+P**) → `Developer: Reload Window`
+**Note:** Manual injection must be re-applied after every pixel-agents update.
 
 ## Uninstalling
 
-### Scripted
+If installed via the built-in mod loader, remove the directory:
+
+```bash
+rm -rf ~/.pixel-agents/mods/pixel-agents-bloody-chunks-mod
+```
+
+If installed via manual injection:
 
 ```bash
 ./uninstall.sh
 ```
 
-Restores the original `index.html` from the backup and removes the mod script. Reload VS Code to deactivate.
-
-### Manual
-
-Remove the `<script>` line you added from `index.html`. You can leave the JS file in place or delete it.
+Restores the original `index.html` from the backup and removes the mod script.
 
 ## Customisation
 
