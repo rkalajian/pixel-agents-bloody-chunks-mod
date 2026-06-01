@@ -1,0 +1,9 @@
+{
+  "id": "pixel-agents-bloody-chunks-mod",
+  "name": "Bloody Chunks",
+  "version": "1.0.0",
+  "description": "Agents explode into bloody pixel chunks on close instead of vanishing quietly. Includes brown chunks for bathroom-break compatibility.",
+  "scripts": [
+    "blood-explosion.js"
+  ]
+}
